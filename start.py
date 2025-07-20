@@ -42,32 +42,58 @@ class ProcessManager:
         if not venv_dir.exists():
             print("🔧 Setting up Python virtual environment...")
             try:
+                # Create virtual environment
                 self.run_command([sys.executable, '-m', 'venv', 'venv'], cwd=self.backend_dir).wait()
                 
-                # Install requirements
-                pip = str(venv_dir / 'Scripts' / 'pip')
-                if sys.platform != 'win32':
-                    pip = str(venv_dir / 'bin' / 'pip')
+                # Get the correct pip path based on platform
+                if sys.platform == 'win32':
+                    pip_path = venv_dir / 'Scripts' / 'pip.exe'
+                    python_path = venv_dir / 'Scripts' / 'python.exe'
+                else:
+                    pip_path = venv_dir / 'bin' / 'pip'
+                    python_path = venv_dir / 'bin' / 'python'
                 
-                self.run_command([pip, 'install', '-r', 'requirements.txt'], cwd=self.backend_dir).wait()
+                # Ensure pip is up to date
+                self.run_command([str(python_path), '-m', 'pip', 'install', '--upgrade', 'pip']).wait()
+                
+                # Install requirements
+                requirements_file = self.backend_dir / 'requirements.txt'
+                if requirements_file.exists():
+                    self.run_command([str(pip_path), 'install', '-r', str(requirements_file)]).wait()
+                else:
+                    print(f"⚠️ requirements.txt not found at {requirements_file}")
+                
                 return True
             except Exception as e:
+                import traceback
                 print(f"❌ Failed to set up virtual environment: {e}")
+                print(traceback.format_exc())
                 return False
         return True
     
     def start_backend(self) -> Optional[subprocess.Popen]:
         """Start the FastAPI backend server."""
         print("🚀 Starting backend server...")
-        python = self.backend_dir / 'venv' / 'Scripts' / 'python'
-        if sys.platform != 'win32':
-            python = self.backend_dir / 'venv' / 'bin' / 'python'
         
-        if not python.exists():
-            print("❌ Python virtual environment not found. Please run setup first.")
+        # Determine the correct Python path based on platform
+        if sys.platform == 'win32':
+            python_path = self.backend_dir / 'venv' / 'Scripts' / 'python.exe'
+        else:
+            python_path = self.backend_dir / 'venv' / 'bin' / 'python'
+        
+        # Convert to string for subprocess
+        python_exec = str(python_path.resolve())
+        
+        if not python_path.exists():
+            print(f"❌ Python executable not found at: {python_exec}")
+            print("Please make sure the virtual environment was created successfully.")
             return None
-            
-        return self.run_command([str(python), '-m', 'uvicorn', 'main:app', '--reload'], cwd=self.backend_dir)
+        
+        print(f"✅ Using Python at: {python_exec}")
+        return self.run_command(
+            [python_exec, '-m', 'uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8000'],
+            cwd=self.backend_dir
+        )
     
     def start_frontend(self) -> Optional[subprocess.Popen]:
         """Start the Next.js frontend development server."""
