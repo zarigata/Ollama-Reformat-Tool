@@ -1,17 +1,21 @@
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Form, Query
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Form, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Generator
 import subprocess
 import os
 import shutil
 import uuid
 from datetime import datetime
-import json
 from pathlib import Path
 import hashlib
+import sqlalchemy
+from sqlalchemy.orm import Session
 
 from prompt_engineer import PromptEngineer
+from .database import engine, get_db
+from .models import Book as DBBook, Base
 
 app = FastAPI(title="Ulama LLM Trainer")
 
@@ -74,25 +78,11 @@ class TrainingConfig(BaseModel):
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 MODELS_DIR = BASE_DIR / "models"
-BOOKS_DB = BASE_DIR / "books_db.json"
+UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
+MODELS_DIR.mkdir(exist_ok=True, parents=True)
 
-# Create directories if they don't exist
-UPLOAD_DIR.mkdir(exist_ok=True)
-MODELS_DIR.mkdir(exist_ok=True)
-
-# Initialize books database if it doesn't exist
-if not BOOKS_DB.exists():
-    with open(BOOKS_DB, 'w') as f:
-        json.dump({"books": [], "next_id": 1}, f)
-
-# Load books database
-def load_books_db():
-    with open(BOOKS_DB, 'r') as f:
-        return json.load(f)
-
-def save_books_db(data):
-    with open(BOOKS_DB, 'w') as f:
-        json.dump(data, f, default=str)
+# Mount static files
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 def calculate_file_hash(file_path: str) -> str:
     """Calculate SHA-256 hash of a file"""
@@ -103,147 +93,235 @@ def calculate_file_hash(file_path: str) -> str:
     return sha256_hash.hexdigest()
 
 # API Endpoints
-@app.post("/api/upload")
+@app.post("/upload/", response_model=BookMetadata, status_code=status.HTTP_201_CREATED)
 async def upload_file(
     file: UploadFile = File(...),
     title: str = Form(None),
     author: str = Form("Unknown"),
     description: str = Form(""),
     tags: str = Form(""),
-    is_public: bool = Form(False)
+    is_public: bool = Form(False),
+    db: Session = Depends(get_db)
 ):
     """Handle file uploads with metadata"""
+    # Generate a unique filename
+    file_ext = Path(file.filename).suffix
+    file_id = str(uuid.uuid4())
+    file_path = UPLOAD_DIR / f"{file_id}{file_ext}"
+    
+    # Ensure upload directory exists
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Save the file
     try:
-        # Save the file
-        file_extension = Path(file.filename).suffix
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = UPLOAD_DIR / unique_filename
-        
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        # Calculate file hash
-        file_hash = calculate_file_hash(file_path)
-        
-        # Get word count (approximate)
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-            word_count = len(content.split())
-        
-        # Create book metadata
-        book_data = {
-            "id": str(uuid.uuid4()),
-            "title": title or Path(file.filename).stem,
-            "author": author,
-            "description": description,
-            "tags": [tag.strip() for tag in tags.split(",") if tag.strip()],
-            "file_path": str(file_path),
-            "file_name": file.filename,
-            "file_hash": file_hash,
-            "file_size": os.path.getsize(file_path),
-            "word_count": word_count,
-            "upload_date": datetime.utcnow().isoformat(),
-            "is_public": is_public,
-            "custom_metadata": {}
-        }
-        
-        # Save to database
-        db = load_books_db()
-        db["books"].append(book_data)
-        save_books_db(db)
-        
-        return {"status": "success", "book": book_data}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error saving file: {str(e)}"
+        )
+    
+    # Generate metadata
+    file_hash = calculate_file_hash(file_path)
+    
+    # Create database record
+    db_book = DBBook(
+        id=file_id,
+        title=title or Path(file.filename).stem,
+        author=author,
+        content="",  # For large files, we might want to store content separately
+        file_path=str(file_path.relative_to(BASE_DIR)),
+        file_hash=file_hash,
+        file_size=os.path.getsize(file_path),
+        mime_type=file.content_type or "application/octet-stream"
+    )
+    
+    try:
+        db.add(db_book)
+        db.commit()
+        db.refresh(db_book)
+    except Exception as e:
+        db.rollback()
+        # Clean up the uploaded file if database operation fails
+        if file_path.exists():
+            file_path.unlink()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+    
+    # Convert to response model
+    return BookMetadata(
+        id=db_book.id,
+        title=db_book.title,
+        author=db_book.author,
+        description=description,
+        tags=[t.strip() for t in tags.split(",") if t.strip()],
+        is_public=is_public,
+        file_path=db_book.file_path,
+        file_hash=db_book.file_hash,
+        created_at=db_book.created_at.isoformat(),
+        updated_at=db_book.updated_at.isoformat() if db_book.updated_at else None,
+        file_size=db_book.file_size,
+        mime_type=db_book.mime_type,
+        status="uploaded"
+    )
 
-@app.get("/api/books")
+@app.get("/books/", response_model=List[BookMetadata])
 async def list_books(
     search: Optional[str] = None,
     tags: List[str] = Query(None),
     author: Optional[str] = None,
     limit: int = 100,
-    offset: int = 0
+    offset: int = 0,
+    db: Session = Depends(get_db)
 ):
     """List all books with optional filtering"""
-    try:
-        db = load_books_db()
-        books = db["books"]
-        
-        # Apply filters
-        if search:
-            search = search.lower()
-            books = [b for b in books if 
-                    search in b.get("title", "").lower() or 
-                    search in b.get("description", "").lower() or
-                    search in b.get("content", "").lower()]
-        
-        if tags:
-            books = [b for b in books if any(tag in b.get("tags", []) for tag in tags)]
-            
-        if author:
-            author = author.lower()
-            books = [b for b in books if author in b.get("author", "").lower()]
-        
-        # Pagination
-        total = len(books)
-        books = books[offset:offset + limit]
-        
-        return {
-            "total": total,
-            "count": len(books),
-            "offset": offset,
-            "limit": limit,
-            "books": books
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    query = db.query(DBBook)
+    
+    # Apply filters
+    if search:
+        search = f"%{search.lower()}%"
+        query = query.filter(sqlalchemy.or_(
+            DBBook.title.ilike(search),
+            DBBook.author.ilike(search)
+        ))
+    
+    if author:
+        query = query.filter(DBBook.author.ilike(f"%{author}%"))
+    
+    # Note: For tags, we'd need a separate table for many-to-many relationship
+    # This is simplified for the example
+    
+    # Apply pagination
+    books = query.offset(offset).limit(limit).all()
+    
+    # Convert to response model
+    return [
+        BookMetadata(
+            id=book.id,
+            title=book.title,
+            author=book.author,
+            description="",  # Add if you have a description field
+            tags=[],  # Add if you implement tags
+            is_public=True,  # Default value
+            file_path=book.file_path,
+            file_hash=book.file_hash,
+            created_at=book.created_at.isoformat(),
+            updated_at=book.updated_at.isoformat() if book.updated_at else None,
+            file_size=book.file_size,
+            mime_type=book.mime_type,
+            status="processed" if book.content else "uploaded"
+        )
+        for book in books
+    ]
 
-@app.get("/api/books/{book_id}")
-async def get_book(book_id: str):
+@app.get("/books/{book_id}", response_model=BookMetadata)
+async def get_book(book_id: str, db: Session = Depends(get_db)):
     """Get a single book by ID"""
-    try:
-        db = load_books_db()
-        for book in db["books"]:
-            if book["id"] == book_id:
-                return book
-        raise HTTPException(status_code=404, detail="Book not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    book = db.query(DBBook).filter(DBBook.id == book_id).first()
+    if not book:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Book not found"
+        )
+    
+    return BookMetadata(
+        id=book.id,
+        title=book.title,
+        author=book.author,
+        description="",  # Add if you have a description field
+        tags=[],  # Add if you implement tags
+        is_public=True,  # Default value
+        file_path=book.file_path,
+        file_hash=book.file_hash,
+        created_at=book.created_at.isoformat(),
+        updated_at=book.updated_at.isoformat() if book.updated_at else None,
+        file_size=book.file_size,
+        mime_type=book.mime_type,
+        status="processed" if book.content else "uploaded"
+    )
 
-@app.put("/api/books/{book_id}")
-async def update_book(book_id: str, update_data: BookUpdate):
+@app.put("/books/{book_id}", response_model=BookMetadata)
+async def update_book(
+    book_id: str, 
+    update_data: BookUpdate,
+    db: Session = Depends(get_db)
+):
     """Update book metadata"""
+    book = db.query(DBBook).filter(DBBook.id == book_id).first()
+    if not book:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Book not found"
+        )
+    
+    # Update fields from the request
+    update_dict = update_data.dict(exclude_unset=True)
+    for field, value in update_dict.items():
+        if hasattr(book, field):
+            setattr(book, field, value)
+    
     try:
-        db = load_books_db()
-        for book in db["books"]:
-            if book["id"] == book_id:
-                # Update fields that are provided
-                update_dict = update_data.dict(exclude_unset=True)
-                book.update(update_dict)
-                save_books_db(db)
-                return {"status": "success", "book": book}
-        raise HTTPException(status_code=404, detail="Book not found")
+        db.commit()
+        db.refresh(book)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating book: {str(e)}"
+        )
+    
+    # Return the updated book
+    return BookMetadata(
+        id=book.id,
+        title=book.title,
+        author=book.author,
+        description="",  # Add if you have a description field
+        tags=[],  # Add if you implement tags
+        is_public=True,  # Default value
+        file_path=book.file_path,
+        file_hash=book.file_hash,
+        created_at=book.created_at.isoformat(),
+        updated_at=book.updated_at.isoformat() if book.updated_at else None,
+        file_size=book.file_size,
+        mime_type=book.mime_type,
+        status="processed" if book.content else "uploaded"
+    )
 
-@app.delete("/api/books/{book_id}")
-async def delete_book(book_id: str):
+@app.delete("/books/{book_id}")
+async def delete_book(book_id: str, db: Session = Depends(get_db)):
     """Delete a book and its associated file"""
+    book = db.query(DBBook).filter(DBBook.id == book_id).first()
+    if not book:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Book not found"
+        )
+    
+    file_path = BASE_DIR / book.file_path
+    
     try:
-        db = load_books_db()
-        for i, book in enumerate(db["books"]):
-            if book["id"] == book_id:
-                # Delete the file if it exists
-                file_path = book.get("file_path")
-                if file_path and os.path.exists(file_path):
-                    os.remove(file_path)
-                # Remove from database
-                db["books"].pop(i)
-                save_books_db(db)
-                return {"status": "success", "message": "Book deleted"}
-        raise HTTPException(status_code=404, detail="Book not found")
+        # Delete the database record
+        db.delete(book)
+        db.commit()
+        
+        # Delete the file
+        if file_path.exists():
+            file_path.unlink()
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting book: {str(e)}"
+        )
+    
+    return {
+        "status": "success", 
+        "message": "Book deleted successfully"
+    }
 
 @app.post("/api/train")
 async def train_model(
