@@ -1,8 +1,16 @@
 import { useState, useEffect } from 'react';
-import { useDropzone } from 'react-dropzone';
 import axios from 'axios';
+import dynamic from 'next/dynamic';
 
-interface Model {
+// Dynamically import components with no SSR
+const BookManager = dynamic(() => import('../components/BookManager'), { ssr: false });
+const TrainingConfigForm = dynamic(() => import('../components/TrainingConfigForm'), { ssr: false });
+const TrainingStatus = dynamic(() => import('../components/TrainingStatus'), { ssr: false });
+
+// Types
+import { TrainingConfig, TrainingStatus as TrainingStatusType } from '../types/training';
+
+interface OllamaModel {
   name: string;
   model: string;
   modified_at: string;
@@ -11,218 +19,237 @@ interface Model {
 }
 
 export default function Home() {
-  const [files, setFiles] = useState<File[]>([]);
-  const [models, setModels] = useState<Model[]>([]);
-  const [baseModel, setBaseModel] = useState('llama3');
+  // State for Ollama models and training
+  const [models, setModels] = useState<OllamaModel[]>([]);
   const [isTraining, setIsTraining] = useState(false);
-  const [trainingProgress, setTrainingProgress] = useState(0);
-  const [customPrompt, setCustomPrompt] = useState('');
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    accept: {
-      'text/plain': ['.txt', '.jsonl'],
-      'application/json': ['.json']
-    },
-    onDrop: (acceptedFiles) => {
-      setFiles(prevFiles => [...prevFiles, ...acceptedFiles]);
-    },
-  });
-
+  const [trainingJob, setTrainingJob] = useState<{id: string} | null>(null);
+  const [selectedBooks, setSelectedBooks] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<'books' | 'train' | 'models'>('books');
+  const [apiUrl, setApiUrl] = useState('http://localhost:8000');
+  
+  // Load available Ollama models
   const loadModels = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/ollama/models');
+      const response = await axios.get(`${apiUrl}/api/ollama/models`);
       if (response.data.models) {
         setModels(response.data.models);
       }
     } catch (error) {
       console.error('Error loading models:', error);
+      // Fallback to default models if API is not available
+      setModels([
+        { name: 'llama3', model: 'llama3', modified_at: new Date().toISOString(), size: 0, digest: '' },
+        { name: 'mistral', model: 'mistral', modified_at: new Date().toISOString(), size: 0, digest: '' },
+      ]);
     }
   };
 
+  // Initialize
   useEffect(() => {
     loadModels();
+    
+    // Load API URL from localStorage if available
+    const savedApiUrl = localStorage.getItem('ollama_api_url');
+    if (savedApiUrl) {
+      setApiUrl(savedApiUrl);
+    }
   }, []);
 
-  const startTraining = async () => {
-    if (files.length === 0) {
-      alert('Please upload at least one training file');
+  // Handle book selection
+  const handleSelectBook = (bookId: string) => {
+    setSelectedBooks(prev => 
+      prev.includes(bookId) 
+        ? prev.filter(id => id !== bookId)
+        : [...prev, bookId]
+    );
+  };
+
+  // Start training with the given configuration
+  const startTraining = async (config: TrainingConfig) => {
+    if (selectedBooks.length === 0) {
+      alert('Please select at least one book for training');
       return;
     }
 
     setIsTraining(true);
-    setTrainingProgress(0);
-
+    
     try {
-      // Upload files
-      const uploadedFiles = [];
-      for (const file of files) {
-        const formData = new FormData();
-        formData.append('file', file);
-        const response = await axios.post('http://localhost:8000/api/upload', formData, {
-          headers: {
-            'Content-Type': 'multipart/form-data',
-          },
-        });
-        uploadedFiles.push(response.data.filename);
-      }
-
-      // Start training
-      const trainingResponse = await axios.post('http://localhost:8000/api/train', {
-        base_model: baseModel,
-        data_files: uploadedFiles,
-        custom_prompt: customPrompt || undefined,
+      const response = await axios.post(`${apiUrl}/api/train`, {
+        ...config,
+        book_ids: selectedBooks,
       });
-
-      // Poll for training progress
-      const checkProgress = async () => {
-        try {
-          const progress = await axios.get(`/api/training-progress/${trainingResponse.data.model_name}`);
-          setTrainingProgress(progress.data.progress);
-          
-          if (progress.data.status === 'completed') {
-            clearInterval(interval);
-            setIsTraining(false);
-            alert('Training completed successfully!');
-          } else if (progress.data.status === 'failed') {
-            clearInterval(interval);
-            setIsTraining(false);
-            alert('Training failed: ' + progress.data.error);
-          }
-        } catch (error) {
-          console.error('Error checking progress:', error);
-        }
-      };
-
-      const interval = setInterval(checkProgress, 5000);
-      checkProgress();
-
+      
+      setTrainingJob({
+        id: response.data.job_id,
+      });
+      
     } catch (error) {
-      console.error('Error during training:', error);
+      console.error('Error starting training:', error);
+      alert('Failed to start training. Please check the console for details.');
       setIsTraining(false);
-      alert('An error occurred during training');
     }
+  };
+  
+  // Handle training completion
+  const handleTrainingComplete = (modelPath: string) => {
+    setIsTraining(false);
+    // You could add a notification here
+    console.log('Training completed! Model saved to:', modelPath);
+  };
+  
+  // Handle training error
+  const handleTrainingError = (error: string) => {
+    setIsTraining(false);
+    console.error('Training error:', error);
   };
 
   return (
     <div className="min-h-screen bg-gray-100">
       <header className="bg-white shadow">
-        <div className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-          <h1 className="text-3xl font-bold text-gray-900">Ulama LLM Trainer</h1>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center py-4">
+            <h1 className="text-2xl font-bold text-gray-900">Ulama LLM Trainer</h1>
+            <div className="flex items-center space-x-4">
+              <div className="relative">
+                <label htmlFor="api-url" className="sr-only">API URL</label>
+                <input
+                  id="api-url"
+                  type="text"
+                  value={apiUrl}
+                  onChange={(e) => {
+                    const url = e.target.value;
+                    setApiUrl(url);
+                    localStorage.setItem('ollama_api_url', url);
+                  }}
+                  placeholder="http://localhost:8000"
+                  className="w-64 px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                />
+                <span className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                  <span className={`h-2.5 w-2.5 rounded-full ${models.length > 0 ? 'bg-green-400' : 'bg-red-400'}`}></span>
+                </span>
+              </div>
+            </div>
+          </div>
+          
+          <nav className="flex space-x-8 border-b border-gray-200">
+            {['books', 'train', 'models'].map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab as any)}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === tab
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              </button>
+            ))}
+          </nav>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         <div className="px-4 py-6 sm:px-0">
-          <div className="border-2 border-dashed border-gray-300 rounded-lg p-6">
-            <div
-              {...getRootProps()}
-              className={`text-center p-12 ${isDragActive ? 'bg-blue-50' : 'bg-white'}`}
-            >
-              <input {...getInputProps()} />
-              <p className="text-lg text-gray-600">
-                {isDragActive
-                  ? 'Drop the files here...'
-                  : 'Drag and drop your training files here, or click to select files'}
-              </p>
-              <p className="mt-2 text-sm text-gray-500">
-                Supported formats: .txt, .json, .jsonl
-              </p>
-            </div>
-          </div>
-
-          {files.length > 0 && (
-            <div className="mt-6">
-              <h2 className="text-lg font-medium text-gray-900 mb-2">Selected Files</h2>
-              <ul className="border border-gray-200 rounded-md divide-y divide-gray-200">
-                {files.map((file, index) => (
-                  <li key={index} className="pl-3 pr-4 py-3 flex items-center justify-between text-sm">
-                    <div className="w-0 flex-1 flex items-center">
-                      <span className="ml-2 flex-1 w-0 truncate">
-                        {file.name}
-                      </span>
-                    </div>
-                    <div className="ml-4 flex-shrink-0">
-                      <button
-                        onClick={() => setFiles(files.filter((_, i) => i !== index))}
-                        className="font-medium text-red-600 hover:text-red-500"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
+          {activeTab === 'books' && (
+            <div className="space-y-6">
+              <div className="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div className="px-4 py-5 sm:px-6">
+                  <h2 className="text-lg font-medium text-gray-900">Book Library</h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Upload and manage your training data.
+                  </p>
+                </div>
+                <div className="border-t border-gray-200 p-6">
+                  <BookManager 
+                    onSelectBook={handleSelectBook} 
+                    selectedBooks={selectedBooks} 
+                  />
+                </div>
+              </div>
             </div>
           )}
 
-          <div className="mt-8 bg-white shadow overflow-hidden sm:rounded-lg">
-            <div className="px-4 py-5 sm:p-6">
-              <h3 className="text-lg leading-6 font-medium text-gray-900">Training Configuration</h3>
-              
-              <div className="mt-5 grid grid-cols-1 gap-6 sm:grid-cols-2">
-                <div>
-                  <label htmlFor="baseModel" className="block text-sm font-medium text-gray-700">
-                    Base Model
-                  </label>
-                  <select
-                    id="baseModel"
-                    value={baseModel}
-                    onChange={(e) => setBaseModel(e.target.value)}
-                    className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-                  >
-                    {models.map((model) => (
-                      <option key={model.name} value={model.name}>
-                        {model.name}
-                      </option>
-                    ))}
-                  </select>
+          {activeTab === 'train' && (
+            <div className="space-y-6">
+              <div className="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div className="px-4 py-5 sm:px-6">
+                  <h2 className="text-lg font-medium text-gray-900">Train New Model</h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Configure and start training a new model with your selected books.
+                  </p>
                 </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">
-                    Custom System Prompt (Optional)
-                  </label>
-                  <div className="mt-1">
-                    <textarea
-                      rows={3}
-                      className="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 mt-1 block w-full sm:text-sm border border-gray-300 rounded-md"
-                      placeholder="Enter a custom system prompt..."
-                      value={customPrompt}
-                      onChange={(e) => setCustomPrompt(e.target.value)}
-                    />
-                  </div>
+                <div className="border-t border-gray-200 p-6">
+                  {trainingJob ? (
+                    <div className="space-y-4">
+                      <h3 className="text-lg font-medium">Training in Progress</h3>
+                      <TrainingStatus 
+                        jobId={trainingJob.id} 
+                        onComplete={handleTrainingComplete}
+                        onError={handleTrainingError}
+                      />
+                      <button
+                        onClick={() => {
+                          setTrainingJob(null);
+                          setIsTraining(false);
+                        }}
+                        className="mt-4 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                      >
+                        Back to Training
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-6">
+                      <div className="bg-blue-50 border-l-4 border-blue-400 p-4">
+                        <div className="flex">
+                          <div className="flex-shrink-0">
+                            <svg className="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h2a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                            </svg>
+                          </div>
+                          <div className="ml-3">
+                            <p className="text-sm text-blue-700">
+                              {selectedBooks.length > 0 
+                                ? `${selectedBooks.length} book${selectedBooks.length > 1 ? 's' : ''} selected for training`
+                                : 'No books selected. Please go to the Books tab and select at least one book to train on.'}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <TrainingConfigForm 
+                        onSubmit={startTraining} 
+                        loading={isTraining}
+                        availableModels={models.map(m => m.name)}
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
-
-              <div className="mt-5">
-                <button
-                  type="button"
-                  onClick={startTraining}
-                  disabled={isTraining || files.length === 0}
-                  className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${
-                    isTraining || files.length === 0 ? 'opacity-50 cursor-not-allowed' : ''
-                  }`}
-                >
-                  {isTraining ? 'Training in Progress...' : 'Start Training'}
-                </button>
-              </div>
-
-              {isTraining && (
-                <div className="mt-6">
-                  <div className="flex justify-between text-sm text-gray-600 mb-1">
-                    <span>Training Progress</span>
-                    <span>{Math.round(trainingProgress)}%</span>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-2.5">
-                    <div
-                      className="bg-indigo-600 h-2.5 rounded-full"
-                      style={{ width: `${trainingProgress}%` }}
-                    ></div>
-                  </div>
-                </div>
-              )}
             </div>
-          </div>
+          )}
+
+          {activeTab === 'models' && (
+            <div className="bg-white shadow overflow-hidden sm:rounded-lg">
+              <div className="px-4 py-5 sm:px-6">
+                <h2 className="text-lg font-medium text-gray-900">Trained Models</h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  View and manage your trained models.
+                </p>
+              </div>
+              <div className="border-t border-gray-200 p-6">
+                <div className="text-center text-gray-500 py-8">
+                  <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                  <h3 className="mt-2 text-sm font-medium text-gray-900">No models yet</h3>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Train your first model to see it here.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </main>
     </div>
