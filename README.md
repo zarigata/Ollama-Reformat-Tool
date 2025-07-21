@@ -1,92 +1,55 @@
-# Ulama LLM Trainer
+# 🧙‍♂️ One Ring to Tune Them All - AI Fine-Tuning Platform
 
-A web-based interface for fine-tuning LLM models with custom knowledge using Ollama. This application allows you to upload training data, configure model parameters, and train custom models with ease.
+> "The world is not in your books and maps, it's out there." - J.R.R. Tolkien
 
-## Features
+## 🏰 Project Overview
 
-- Upload training data in various formats (TXT, JSON, JSONL)
-- Select from available Ollama base models
-- Customize training parameters (learning rate, batch size, epochs)
-- Add custom system prompts
-- Monitor training progress in real-time
-- Simple and intuitive user interface
+Welcome to the One Ring to Tune Them All, a powerful AI model fine-tuning platform that brings the magic of Middle-earth to machine learning. This platform allows you to fine-tune state-of-the-art language models with your custom datasets, all through an intuitive interface.
 
-## Prerequisites
+## 🧭 Features
 
-- Python 3.8+
-- Node.js 16+
-- Ollama installed and running locally
+- 🏗️ Modular architecture for easy extension
+- 🎛️ Hardware auto-detection (CUDA/ROCm/CPU)
+- 📚 Document ingestion (PDF, EPUB, TXT, DOCX)
+- 🧠 Advanced fine-tuning techniques (LoRA, QLoRA, AdaLoRA)
+- 📊 Training monitoring and evaluation
+- 🚀 Model export and deployment
 
-## Backend Setup
+## 🛠️ Installation
 
-1. Navigate to the backend directory:
-   ```bash
-   cd backend
-   ```
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/one-ring-to-tune-them-all.git
+cd one-ring-to-tune-them-all
 
-2. Create and activate a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: .\\venv\\Scripts\\activate
-   ```
+# Create and activate a virtual environment
+python -m venv venv
+.\venv\Scripts\activate  # On Windows
+source venv/bin/activate  # On Unix/macOS
 
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Start the backend server:
-   ```bash
-   uvicorn main:app --reload
-   ```
-
-The backend will be available at `http://localhost:8000`
-
-## Frontend Setup
-
-1. Navigate to the frontend directory:
-   ```bash
-   cd frontend
-   ```
-
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Start the development server:
-   ```bash
-   npm run dev
-   ```
-
-The frontend will be available at `http://localhost:3000`
-
-## Usage
-
-1. Open the application in your web browser
-2. Upload one or more training files
-3. Select a base model from the dropdown
-4. (Optional) Add a custom system prompt
-5. Click "Start Training" to begin the fine-tuning process
-6. Monitor the training progress in the progress bar
-
-## Project Structure
-
-```
-├── backend/
-│   ├── main.py           # FastAPI application
-│   ├── requirements.txt   # Python dependencies
-│   ├── uploads/          # Temporary storage for uploaded files
-│   └── models/           # Trained models will be saved here
-├── frontend/
-│   ├── pages/            # Next.js pages
-│   ├── public/           # Static files
-│   ├── styles/           # Global styles
-│   ├── package.json      # Frontend dependencies
-│   └── tailwind.config.js # Tailwind CSS configuration
-└── README.md             # This file
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-## License
+## 🚀 Quick Start
 
-This project is open source and available under the [MIT License](LICENSE).
+```bash
+# Start the application
+python -m one_ring
+```
+
+## 📚 Documentation
+
+For detailed documentation, please visit our [Wiki](https://github.com/yourusername/one-ring-to-tune-them-all/wiki).
+
+## 🤝 Contributing
+
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details.
+
+## 📜 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+> "All we have to decide is what to do with the time that is given us." - Gandalf
