@@ -1,0 +1,8 @@
+# Document processing dependencies
+python-magic-bin==0.4.14; platform_system == "Windows"
+python-magic==0.4.27; platform_system != "Windows"
+pypandoc>=1.7.2
+pypdf2>=3.0.0
+EbookLib>=0.18
+tqdm>=4.65.0
+beautifulsoup4>=4.12.2
