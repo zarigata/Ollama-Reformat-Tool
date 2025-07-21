@@ -19,6 +19,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 import venv
 from pathlib import Path
 from typing import Optional, Tuple
@@ -68,9 +69,7 @@ def print_error(message: str, exit_code: int = 1):
 def run_command(command: str, cwd: Optional[Path] = None, shell: bool = False) -> Tuple[int, str]:
     """Run a shell command and return the exit code and output."""
     try:
-        # Always use shell=True on Windows to handle paths with spaces correctly
-        use_shell = shell or platform.system() == "Windows"
-        if use_shell:
+        if shell:
             result = subprocess.run(
                 command,
                 shell=True,
@@ -87,122 +86,300 @@ def run_command(command: str, cwd: Optional[Path] = None, shell: bool = False) -
                 text=True,
                 check=False
             )
-        return result.returncode, result.stdout.strip() + "\n" + result.stderr.strip()
+        return result.returncode, result.stdout.strip()
     except Exception as e:
         return 1, str(e)
 
 def check_python_version():
-    """Check if the Python version is supported."""
+    """Check if the Python version is supported.
+    
+    The One Ring AI Platform is optimized for Python 3.11.
+    """
     print_step("Checking Python version")
-    if sys.version_info < (3, 9):
-        print_error("Python 3.9 or higher is required")
-    print_success(f"Using Python {sys.version.split()[0]}")
+    version = sys.version_info
+    version_str = f"{version.major}.{version.minor}.{version.micro}"
+    
+    # Enforce Python 3.11 specifically
+    if version.major != 3 or version.minor != 11:
+        print_warning(f"Python 3.11.x is required, but you are using {version_str}")
+        print_warning("Please install Python 3.11 and try again")
+        print_warning("You can download it from https://www.python.org/downloads/release/python-3118/")
+        sys.exit(1)
+    
+    print_success(f"Using Python {version_str}")
 
-def create_virtualenv(force_recreate=False):
+def create_virtualenv(force=False):
     """Create a Python virtual environment.
     
     Args:
-        force_recreate: If True, delete the existing environment if it exists.
+        force: If True, recreate the virtual environment even if it exists.
     """
-    print_step(f"Creating virtual environment at {VENV_DIR}")
+    print_step(f"Setting up virtual environment at {VENV_DIR}")
     
-    # Check if we need to recreate the environment
-    if VENV_DIR.exists() and force_recreate:
-        print_warning(f"Removing existing virtual environment at {VENV_DIR}")
+    # Check if virtual environment exists and is valid
+    venv_valid = False
+    pyvenv_cfg = VENV_DIR / "pyvenv.cfg"
+    python_exe = VENV_DIR / "Scripts" / "python.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "python"
+    pip_exe = VENV_DIR / "Scripts" / "pip.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "pip"
+    
+    if VENV_DIR.exists() and pyvenv_cfg.exists() and python_exe.exists() and pip_exe.exists() and not force:
         try:
-            shutil.rmtree(VENV_DIR)
-            print_success("Existing environment removed")
+            # Test if the Python in the venv actually works
+            result = subprocess.run(
+                [str(python_exe), "-c", "print('Virtual environment is working')"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode == 0 and "working" in result.stdout:
+                print_success("Existing virtual environment is valid")
+                venv_valid = True
+            else:
+                print_warning("Existing virtual environment appears to be corrupted")
         except Exception as e:
-            print_error(f"Failed to remove existing environment: {e}")
-    elif VENV_DIR.exists():
-        # Check if the environment appears to be valid
-        pip_path = VENV_DIR / "Scripts" / "pip.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "pip"
-        if not pip_path.exists():
-            print_warning(f"Virtual environment at {VENV_DIR} appears to be corrupted (pip not found)")
-            try:
-                shutil.rmtree(VENV_DIR)
-                print_success("Corrupted environment removed")
-            except Exception as e:
-                print_error(f"Failed to remove corrupted environment: {e}")
-        else:
-            print_warning(f"Virtual environment already exists at {VENV_DIR}")
-            return
+            print_warning(f"Error testing virtual environment: {e}")
     
-    try:
-        venv.create(VENV_DIR, with_pip=True)
-        print_success("Virtual environment created")
-    except Exception as e:
-        print_error(f"Failed to create virtual environment: {e}")
+    # Remove corrupted or forced virtual environment
+    if VENV_DIR.exists() and (not venv_valid or force):
+        print_step("Removing existing virtual environment")
+        try:
+            if platform.system() == "Windows":
+                # On Windows, some files might be locked, use robocopy to empty the directory
+                # Create empty temp dir
+                temp_dir = PROJECT_DIR / ".venv_temp"
+                temp_dir.mkdir(exist_ok=True)
+                
+                # Use robocopy to mirror empty dir to venv (effectively deleting contents)
+                subprocess.run(
+                    ["robocopy", str(temp_dir), str(VENV_DIR), "/MIR"], 
+                    capture_output=True,
+                    check=False
+                )
+                
+                # Remove temp dir and any remaining venv dir
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                shutil.rmtree(VENV_DIR, ignore_errors=True)
+            else:
+                # On Unix, we can usually just remove the directory
+                shutil.rmtree(VENV_DIR, ignore_errors=True)
+                
+            print_success("Removed existing virtual environment")
+        except Exception as e:
+            print_warning(f"Error removing virtual environment: {e}")
+            print_warning("Continuing anyway, but installation may fail")
+    
+    # Create new virtual environment if needed
+    if not venv_valid:
+        print_step("Creating new virtual environment")
+        try:
+            venv.create(VENV_DIR, with_pip=True)
+            print_success("Virtual environment created successfully")
+        except Exception as e:
+            print_error(f"Failed to create virtual environment: {e}")
 
 def install_dependencies():
     """Install Python dependencies."""
     print_step("Installing dependencies")
     
     # Get the correct pip executable
-    pip = VENV_DIR / "Scripts" / "pip"
-    if platform.system() != "Windows":
-        pip = VENV_DIR / "bin" / "pip"
+    pip_exe = VENV_DIR / "Scripts" / "pip.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "pip"
+    python_exe = VENV_DIR / "Scripts" / "python.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "python"
     
-    # Check if pip exists
-    if not pip.exists() and platform.system() == "Windows":
-        pip = VENV_DIR / "Scripts" / "pip.exe"
-        if not pip.exists():
-            print_error(f"Pip executable not found at {pip}. Virtual environment may be corrupted.")
+    # Check if pip exists and is functional
+    if not pip_exe.exists():
+        print_warning(f"Pip not found at {pip_exe}. Installing pip...")
+        try:
+            # First try using the bootstrap method which is more reliable
+            get_pip_script = PROJECT_DIR / "get-pip.py"
+            
+            # Download get-pip.py if it doesn't exist
+            if not get_pip_script.exists():
+                print_step("Downloading get-pip.py")
+                try:
+                    import requests
+                    response = requests.get("https://bootstrap.pypa.io/get-pip.py")
+                    with open(get_pip_script, "wb") as f:
+                        f.write(response.content)
+                    print_success("Downloaded get-pip.py")
+                except ImportError:
+                    # If requests is not available, use built-in urllib
+                    from urllib.request import urlopen
+                    with urlopen("https://bootstrap.pypa.io/get-pip.py") as response, open(get_pip_script, "wb") as f:
+                        f.write(response.read())
+                    print_success("Downloaded get-pip.py")
+                except Exception as e:
+                    print_warning(f"Error downloading get-pip.py: {e}")
+                    print_warning("Will try ensurepip instead")
+            
+            # Use get-pip.py if it exists
+            if get_pip_script.exists():
+                returncode, output = run_command(f"{python_exe} {get_pip_script}")
+                if returncode == 0:
+                    print_success("Pip installed successfully using get-pip.py")
+                    # Refresh pip executable path
+                    pip_command = f"{pip_exe}"
+                else:
+                    print_warning(f"Failed to install pip using get-pip.py: {output}")
+                    print_warning("Will try ensurepip instead")
+                    # Try to use ensurepip as fallback
+                    returncode, output = run_command(f"{python_exe} -m ensurepip --upgrade")
+                    if returncode != 0:
+                        print_warning(f"Failed to install pip with ensurepip: {output}")
+                        print_warning("Will attempt to use 'python -m pip' instead")
+                        pip_command = f"{python_exe} -m pip"
+                    else:
+                        print_success("Pip installed successfully with ensurepip")
+                        pip_command = f"{pip_exe}"
+            else:
+                # Fallback to ensurepip
+                returncode, output = run_command(f"{python_exe} -m ensurepip --upgrade")
+                if returncode != 0:
+                    print_warning(f"Failed to install pip with ensurepip: {output}")
+                    print_warning("Will attempt to use 'python -m pip' instead")
+                    pip_command = f"{python_exe} -m pip"
+                else:
+                    print_success("Pip installed successfully with ensurepip")
+                    pip_command = f"{pip_exe}"
+        except Exception as e:
+            print_warning(f"Error installing pip: {e}")
+            pip_command = f"{python_exe} -m pip"
+    else:
+        pip_command = f"{pip_exe}"
     
     # Upgrade pip first
     print_step("Upgrading pip")
-    returncode, output = run_command(f"\"{pip}\" install --upgrade pip", shell=True)
+    returncode, output = run_command(f"{pip_command} install --upgrade pip")
     if returncode != 0:
         print_warning(f"Failed to upgrade pip: {output}")
+    
+    # Install required packages for the setup
+    print_step("Installing base packages")
+    base_packages = ["wheel", "setuptools", "requests", "uvicorn", "fastapi", "pydantic", "loguru"]
+    returncode, output = run_command(f"{pip_command} install {' '.join(base_packages)}")
+    if returncode != 0:
+        print_warning(f"Failed to install base packages: {output}")
     else:
-        print_success("Successfully upgraded pip")
+        print_success("Base packages installed successfully")
     
     # Install requirements files
     for req_file in REQUIREMENTS_FILES:
         req_path = PROJECT_DIR / req_file
         if req_path.exists():
             print_step(f"Installing from {req_file}")
-            returncode, output = run_command(f"\"{pip}\" install -r \"{req_path}\"", shell=True)
+            returncode, output = run_command(f"{pip_command} install -r {req_path}")
             if returncode != 0:
                 print_warning(f"Failed to install from {req_file}: {output}")
             else:
                 print_success(f"Successfully installed from {req_file}")
-    
-    # Install core requirements directly
-    print_step("Installing core requirements directly")
-    returncode, output = run_command(
-        f"\"{pip}\" install fastapi uvicorn python-dotenv pydantic loguru", 
-        shell=True
-    )
-    if returncode != 0:
-        print_warning(f"Failed to install core requirements: {output}")
-    else:
-        print_success("Successfully installed core requirements")
-    
-    # Install the package in development mode (only if setup.py exists)
-    setup_file = PROJECT_DIR / "setup.py"
-    if setup_file.exists():
-        print_step("Installing One Ring package in development mode")
-        returncode, output = run_command(f"\"{pip}\" install -e .", shell=True, cwd=PROJECT_DIR)
-        if returncode != 0:
-            print_warning(f"Failed to install One Ring package: {output}")
         else:
-            print_success("Successfully installed One Ring package")
+            print_warning(f"Requirements file {req_file} not found")
+            # Create an empty requirements file if it doesn't exist
+            try:
+                with open(req_path, "w") as f:
+                    f.write("# Requirements file\n# Add your dependencies here\n")
+                print_success(f"Created empty {req_file}")
+            except Exception as e:
+                print_warning(f"Failed to create {req_file}: {e}")
+    
+    # Create setup.py if it doesn't exist
+    setup_py = PROJECT_DIR / "setup.py"
+    if not setup_py.exists():
+        print_warning("setup.py not found, creating a minimal one")
+        try:
+            with open(setup_py, "w") as f:
+                f.write("""\
+from setuptools import setup, find_packages
+
+setup(
+    name="one_ring",
+    version="0.1.0",
+    packages=find_packages(),
+    install_requires=[
+        "fastapi",
+        "uvicorn",
+        "pydantic",
+        "loguru",
+    ],
+)
+""")
+            print_success("Created minimal setup.py")
+        except Exception as e:
+            print_warning(f"Failed to create setup.py: {e}")
+    
+    # Install the package in development mode
+    print_step("Installing One Ring package in development mode")
+    returncode, output = run_command(f"{pip_command} install -e .")
+    if returncode != 0:
+        print_warning(f"Failed to install One Ring package: {output}")
     else:
-        print_warning("No setup.py found, skipping package installation")
+        print_success("Successfully installed One Ring package")
+
+def ensure_ollama_running():
+    """Check if Ollama is installed and running. If installed but not running, start it.
+    
+    In the realms of Middle Earth, the great forge must be lit before the One Ring can be crafted.
+    """
+    print_step("Checking Ollama installation and server status")
+    
+    # Check if ollama is installed
+    returncode, output = run_command("ollama --version")
+    if returncode != 0:
+        print_error("Ollama is not installed. Please install it from https://ollama.com/download", exit_code=1)
+        return False
+    else:
+        print_success(f"Ollama is installed: {output.strip()}")
+    
+    # Check if ollama server is running
+    returncode, output = run_command("ollama list")
+    if returncode != 0:
+        print_warning("Ollama server is not running. Attempting to start it automatically...")
         
-    # Verify uvicorn is installed
-    print_step("Verifying uvicorn installation")
-    returncode, output = run_command(f"\"{pip}\" show uvicorn", shell=True)
-    if returncode != 0:
-        print_warning("Uvicorn not found, installing it explicitly")
-        returncode, output = run_command(f"\"{pip}\" install uvicorn", shell=True)
-        if returncode != 0:
-            print_error(f"Failed to install uvicorn: {output}")
+        # Start Ollama server based on OS
+        if platform.system() == "Windows":
+            # On Windows, start Ollama in a new detached process
+            try:
+                # Using subprocess.Popen to start a detached process
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup_info.wShowWindow = subprocess.SW_HIDE
+                
+                # Start ollama serve in a separate process
+                subprocess.Popen(
+                    ["ollama", "serve"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.PIPE,
+                    startupinfo=startup_info,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+                
+                # Wait for the server to start up
+                print_step("Waiting for Ollama server to start...")
+                max_retries = 5
+                for i in range(max_retries):
+                    time.sleep(2)  # Give it some time to start
+                    returncode, output = run_command("ollama list")
+                    if returncode == 0:
+                        print_success("Ollama server started successfully")
+                        return True
+                    if i < max_retries - 1:
+                        print_step(f"Still waiting... ({i+1}/{max_retries})")
+                
+                print_error("Failed to start Ollama server automatically. Please start it manually with 'ollama serve' in a separate terminal")
+                return False
+                
+            except Exception as e:
+                print_error(f"Error starting Ollama server: {e}")
+                print_warning("Please start it manually with 'ollama serve' in a separate terminal")
+                return False
         else:
-            print_success("Successfully installed uvicorn")
+            # On Unix systems
+            print_warning("On Unix systems, please start Ollama server manually with 'ollama serve' in a separate terminal")
+            print_error("Ollama server is not running", exit_code=1)
+            return False
     else:
-        print_success("Uvicorn is installed")
+        print_success("Ollama server is running")
+        return True
 
 def check_ollama():
     """Check if Ollama is installed and running."""
@@ -234,45 +411,202 @@ def start_application(host: str, port: int):
     """Start the FastAPI application with Uvicorn."""
     print_step("Starting One Ring AI Platform")
     
-    # Get the correct Python executable
-    python = VENV_DIR / "Scripts" / "python"
-    if platform.system() != "Windows":
-        python = VENV_DIR / "bin" / "python"
+    # Set environment variables
+    os.environ["PYTHONPATH"] = str(PROJECT_DIR)
+    
+    # Check if the one_ring package is installed
+    try:
+        import one_ring
+    except ImportError:
+        print_warning("One Ring package not installed. Installing it now...")
+        
+        # Use the same pip command as in install_dependencies
+        pip_exe = VENV_DIR / "Scripts" / "pip.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "pip"
+        python_exe = VENV_DIR / "Scripts" / "python.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "python"
+        
+        if pip_exe.exists():
+            pip_command = f"{pip_exe}"
+        else:
+            pip_command = f"{python_exe} -m pip"
+        
+        returncode, output = run_command(f"{pip_command} install -e .")
+        if returncode != 0:
+            print_error(f"Failed to install One Ring package: {output}")
+        else:
+            print_success("Successfully installed One Ring package")
+    
+    # Check if uvicorn is available
+    try:
+        subprocess.check_output([sys.executable, "-m", "pip", "show", "uvicorn"])
+        uvicorn_installed = True
+    except subprocess.CalledProcessError:
+        uvicorn_installed = False
+    
+    if not uvicorn_installed:
+        print_warning("Uvicorn not found. Installing it now...")
+        
+        # Use the same pip command as before
+        pip_exe = VENV_DIR / "Scripts" / "pip.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "pip"
+        python_exe = VENV_DIR / "Scripts" / "python.exe" if platform.system() == "Windows" else VENV_DIR / "bin" / "python"
+        
+        if pip_exe.exists():
+            pip_command = f"{pip_exe}"
+        else:
+            pip_command = f"{python_exe} -m pip"
+        
+        returncode, output = run_command(f"{pip_command} install uvicorn")
+        if returncode != 0:
+            print_warning(f"Failed to install uvicorn with pip: {output}")
+            print_step("Trying alternative installation method")
+            returncode, output = run_command(f"{sys.executable} -m pip install uvicorn")
+            if returncode != 0:
+                print_error(f"Failed to install uvicorn: {output}")
+        else:
+            print_success("Successfully installed uvicorn")
     
     # Set environment variables
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_DIR)
-    
-    # Check if uvicorn is installed in the virtual environment
-    uvicorn_path = VENV_DIR / "Scripts" / "uvicorn"
-    if platform.system() != "Windows":
-        uvicorn_path = VENV_DIR / "bin" / "uvicorn"
-    
-    if not uvicorn_path.exists():
-        uvicorn_path = VENV_DIR / "Scripts" / "uvicorn.exe"
-        if not uvicorn_path.exists():
-            print_error("Uvicorn not found in the virtual environment. Please install it with 'pip install uvicorn'.")
     
     print(f"\n{Colors.HEADER}{' Starting One Ring AI Platform ':=^60}{Colors.ENDC}")
     print(f"{Colors.BOLD}Server URL:{Colors.ENDC} http://{host}:{port}")
     print(f"{Colors.BOLD}API Docs:{Colors.ENDC} http://{host}:{port}/docs")
     print(f"{Colors.BOLD}Exit:{Colors.ENDC} Press Ctrl+C to stop the server\n")
     
+    # Make sure the one_ring directory exists
+    one_ring_dir = PROJECT_DIR / "one_ring"
+    if not one_ring_dir.exists() or not (one_ring_dir / "__init__.py").exists():
+        print_warning("one_ring package directory not found or incomplete")
+        print_warning("Creating minimal package structure...")
+        create_minimal_package_structure()
+    
     try:
-        # Start the FastAPI server using the module approach
-        cmd = f"\"{python}\" -m uvicorn one_ring.api.app:create_app --host {host} --port {port} --reload"
-        print(f"Running command: {cmd}")
-        process = subprocess.Popen(
-            cmd,
-            shell=True,
-            cwd=str(PROJECT_DIR),
+        # Start the FastAPI server
+        subprocess.run(
+            [
+                str(python_exe), "-m", "uvicorn",
+                "one_ring.api.app:create_app",
+                "--host", host,
+                "--port", str(port),
+                "--reload"
+            ],
+            cwd=PROJECT_DIR,
             env=env
         )
-        process.wait()
     except KeyboardInterrupt:
         print("\nShutting down...")
     except Exception as e:
         print_error(f"Failed to start application: {e}")
+
+def create_minimal_package_structure():
+    """Create a minimal package structure for the application."""
+    print_step("Creating minimal package structure")
+    
+    # Directory structure to create
+    directories = [
+        "one_ring",
+        "one_ring/api",
+        "one_ring/api/v1",
+        "one_ring/api/v1/endpoints",
+        "one_ring/core",
+        "one_ring/services",
+        "one_ring/data",
+        "one_ring/training",
+        "one_ring/utils",
+    ]
+    
+    # Create directories
+    for directory in directories:
+        dir_path = PROJECT_DIR / directory
+        if not dir_path.exists():
+            try:
+                dir_path.mkdir(parents=True, exist_ok=True)
+                print_success(f"Created directory: {directory}")
+            except Exception as e:
+                print_warning(f"Failed to create directory {directory}: {e}")
+    
+    # Define and create files individually to avoid syntax issues with triple quotes
+    init_content = (
+        "# One Ring AI Platform - A powerful tool for fine-tuning language models.\n\n"
+        "__version__ = \"0.1.0\""
+    )
+    
+    empty_init = ""
+    
+    app_content = (
+        "from fastapi import FastAPI, Request, Response\n"
+        "from fastapi.middleware.cors import CORSMiddleware\n"
+        "from fastapi.responses import JSONResponse\n\n"
+        "def create_app():\n"
+        "    \"\"\"Create and configure the FastAPI application.\"\"\"\n"
+        "    app = FastAPI(\n"
+        "        title=\"One Ring AI Platform\",\n"
+        "        description=\"A powerful tool for fine-tuning language models.\",\n"
+        "        version=\"0.1.0\",\n"
+        "    )\n\n"
+        "    # Configure CORS\n"
+        "    app.add_middleware(\n"
+        "        CORSMiddleware,\n"
+        "        allow_origins=[\"*\"],\n"
+        "        allow_credentials=True,\n"
+        "        allow_methods=[\"*\"],\n"
+        "        allow_headers=[\"*\"],\n"
+        "    )\n\n"
+        "    # Health check endpoint\n"
+        "    @app.get(\"/health\")\n"
+        "    def health_check():\n"
+        "        return {\"status\": \"ok\"}\n\n"
+        "    # Root endpoint\n"
+        "    @app.get(\"/\")\n"
+        "    def root():\n"
+        "        return {\"message\": \"Welcome to the One Ring AI Platform\"}\n\n"
+        "    return app"
+    )
+    
+    config_content = (
+        "from pathlib import Path\n"
+        "from typing import List, Optional\n\n"
+        "from pydantic import BaseSettings\n\n"
+        "class Settings(BaseSettings):\n"
+        "    \"\"\"Application settings.\"\"\"\n"
+        "    # API settings\n"
+        "    API_HOST: str = \"127.0.0.1\"\n"
+        "    API_PORT: int = 8000\n\n"
+        "    # Directory settings\n"
+        "    DATA_DIR: Path = Path(\"data\")\n"
+        "    MODEL_SAVE_DIR: Path = Path(\"models\")\n\n"
+        "    class Config:\n"
+        "        env_prefix = \"ONE_RING_\"\n\n"
+        "# Create global settings instance\n"
+        "settings = Settings()"
+    )
+    
+    # Map file paths to content
+    file_contents = {
+        "one_ring/__init__.py": init_content,
+        "one_ring/api/__init__.py": empty_init,
+        "one_ring/api/v1/__init__.py": empty_init,
+        "one_ring/api/v1/endpoints/__init__.py": empty_init,
+        "one_ring/core/__init__.py": empty_init,
+        "one_ring/services/__init__.py": empty_init,
+        "one_ring/data/__init__.py": empty_init,
+        "one_ring/training/__init__.py": empty_init,
+        "one_ring/utils/__init__.py": empty_init,
+        "one_ring/api/app.py": app_content,
+        "one_ring/core/config.py": config_content,
+    }
+    
+    # Create files
+    for file_path, content in file_contents.items():
+        path = PROJECT_DIR / file_path
+        if not path.exists():
+            try:
+                with open(path, "w") as f:
+                    f.write(content)
+                print_success(f"Created file: {file_path}")
+            except Exception as e:
+                print_warning(f"Failed to create file {file_path}: {e}")
+
 
 def main():
     """Main entry point."""
@@ -284,7 +618,7 @@ def main():
         help="Use the system Python instead of creating a virtual environment"
     )
     parser.add_argument(
-        "--recreate-venv",
+        "--force-venv",
         action="store_true",
         help="Force recreation of the virtual environment"
     )
@@ -301,21 +635,26 @@ def main():
         help="Port to run the server on (default: 8000)"
     )
     parser.add_argument(
-        "--install-only",
+        "--debug",
         action="store_true",
-        help="Only install dependencies, don't start the server"
+        help="Enable debug mode with more verbose output"
+    )
+    parser.add_argument(
+        "--no-ollama-check",
+        action="store_true",
+        help="Skip checking and starting Ollama server"
     )
     args = parser.parse_args()
     
     # Print header
     print_header()
     
-    # Check Python version
+    # Check Python version (strictly enforce Python 3.11)
     check_python_version()
     
     # Create virtual environment if not disabled
     if not args.no_venv:
-        create_virtualenv(force_recreate=args.recreate_venv)
+        create_virtualenv(force=args.force_venv)
         # Update Python and pip executables to use the virtual environment
         if VENV_DIR.exists():
             if platform.system() == "Windows":
@@ -329,12 +668,17 @@ def main():
     # Install dependencies
     install_dependencies()
     
-    # Check Ollama
-    check_ollama()
+    # Create package structure if needed
+    one_ring_dir = PROJECT_DIR / "one_ring"
+    if not one_ring_dir.exists() or not (one_ring_dir / "__init__.py").exists():
+        create_minimal_package_structure()
     
-    # Start the application if not in install-only mode
-    if not args.install_only:
-        start_application(args.host, args.port)
+    # Ensure Ollama is running (unless explicitly skipped)
+    if not args.no_ollama_check:
+        ensure_ollama_running()
+    
+    # Start application
+    start_application(args.host, args.port)
 
 if __name__ == "__main__":
     main()
