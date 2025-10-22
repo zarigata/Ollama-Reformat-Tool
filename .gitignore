@@ -1,0 +1,41 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs
+logs/
+*.log
+
+# Configuration and secrets
+config.json
+*.env
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Downloads and temp files
+downloads/
+temp/
+cache/
+
+# Misc
+pip-wheel-metadata/
